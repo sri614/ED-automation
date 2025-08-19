@@ -114,13 +114,17 @@ footer {
   flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  
 }
 .flex{justify-content: start;}
 .flex-box{gap:0px;}
 .flex-bn--alignTop {
   align-items: flex-start;
 }
+.card.subStyle{
+  margin-bottom: 10px;
+}
+
 
 .mb-12 {
   margin-bottom: 12px;
@@ -192,7 +196,6 @@ footer {
   padding: 3px;
   gap:8px;
 }
-
 .box {
   text-align: center;
   padding: 3px;

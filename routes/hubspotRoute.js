@@ -25,20 +25,22 @@ const getFormattedDate = (dateInput) => {
   return `${date.getDate()} ${monthNames[date.getMonth()]} ${date.getFullYear()}`;
 };
 
+// Updated getFilteredDate function to handle all possible date filters
 const getFilteredDate = (daysFilter) => {
   const now = new Date();
   const today = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  
   if (daysFilter === 'today') return today.toISOString().split('T')[0];
-  if (daysFilter === 't+1') {
-    const tomorrow = new Date(today);
-    tomorrow.setUTCDate(today.getUTCDate() + 1);
-    return tomorrow.toISOString().split('T')[0];
+  
+  if (daysFilter.startsWith('t+')) {
+    const daysToAdd = parseInt(daysFilter.slice(2));
+    if (isNaN(daysToAdd)) return null;
+    
+    const futureDate = new Date(today);
+    futureDate.setUTCDate(today.getUTCDate() + daysToAdd);
+    return futureDate.toISOString().split('T')[0];
   }
-  if (daysFilter === 't+2') {
-    const dayAfter = new Date(today);
-    dayAfter.setUTCDate(today.getUTCDate() + 2);
-    return dayAfter.toISOString().split('T')[0];
-  }
+  
   return null;
 };
 
@@ -144,7 +146,7 @@ const updateRecentDate = async (contactIds, dateValue) => {
   for (const chunk of chunks) {
     const payload = {
       inputs: chunk.map(contactId => ({
-        id: contactId.toString(),  // ✅ FIXED here
+        id: contactId.toString(),
         properties: {
           recent_marketing_email_sent_date: epochTime
         }
@@ -166,7 +168,6 @@ const updateRecentDate = async (contactIds, dateValue) => {
     await new Promise(r => setTimeout(r, 300));
   }
 };
-
 
 const processSingleCampaign = async (config, daysFilter, modeFilter, usedContactsSet) => {
   const { brand, campaign, primaryListId, secondaryListId, count, domain, date, sendContactListId } = config;
@@ -289,47 +290,86 @@ const processCampaignsWithDelay = async (listConfigs, daysFilter, modeFilter) =>
   return results;
 };
 
+// Updated route handler with better validation
 router.post('/create-lists', async (req, res) => {
-  const { daysFilter, modeFilter } = req.body;
-  console.log(`📨 Received request to create lists | Filters → Days: ${daysFilter}, Mode: ${modeFilter}`);
+  try {
+    const { daysFilter, modeFilter } = req.body;
+    console.log(`📨 Received request to create lists | Filters → Days: ${daysFilter}, Mode: ${modeFilter}`);
 
-  let query = {};
-
-  if (daysFilter && daysFilter !== 'all') {
-    const filterDate = getFilteredDate(daysFilter);
-    if (!filterDate) return res.status(400).json({ error: 'Invalid date filter' });
-    query.date = filterDate;
-  }
-
-  if (modeFilter && modeFilter !== 'BAU') {
-    query.campaign = { $regex: modeFilter === 're-engagement' ? /re-engagement/i : /re-activation/i };
-  } else if (modeFilter === 'BAU') {
-    query.$and = [
-      { campaign: { $not: { $regex: /re-engagement/i } } },
-      { campaign: { $not: { $regex: /re-activation/i } } }
-    ];
-  }
-
-   const listConfigs = await Segmentation.find(query).sort({ order: 1 }).lean();
-  if (!listConfigs.length) return res.status(404).json({ error: 'No campaigns match the selected filters' });
-
-  res.json({
-    message: `🚀 Background processing started with ${INTER_LIST_DELAY_MS / 60000}-minute delay`,
-    count: listConfigs.length,
-    firstCampaign: listConfigs[0]?.campaign || 'None',
-    totalContactsRequested: listConfigs.reduce((sum, c) => sum + c.count, 0),
-    estimatedCompletionTime: `${Math.ceil(listConfigs.length * INTER_LIST_DELAY_MS / 3600000)} hrs ${Math.ceil((listConfigs.length * INTER_LIST_DELAY_MS % 3600000) / 60000)} mins`
-  });
-
-  setImmediate(async () => {
-    try {
-      await processCampaignsWithDelay(listConfigs, daysFilter, modeFilter);
-    } catch (error) {
-      console.error('❌ Overall process failed:', error.message);
+    // Validate input parameters
+    const validDaysFilters = ['today', 't+1', 't+2', 't+3', 'all'];
+    const validModeFilters = ['BAU', 're-engagement', 're-activation'];
+    
+    if (!daysFilter || !validDaysFilters.includes(daysFilter)) {
+      return res.status(400).json({ 
+        error: 'Invalid date filter',
+        message: `Valid values are: ${validDaysFilters.join(', ')}`,
+        received: daysFilter
+      });
     }
-  });
+
+    if (!modeFilter || !validModeFilters.includes(modeFilter)) {
+      return res.status(400).json({ 
+        error: 'Invalid mode filter',
+        message: `Valid values are: ${validModeFilters.join(', ')}`,
+        received: modeFilter
+      });
+    }
+
+    let query = {};
+
+    if (daysFilter && daysFilter !== 'all') {
+      const filterDate = getFilteredDate(daysFilter);
+      if (!filterDate) {
+        return res.status(400).json({ 
+          error: 'Invalid date filter value',
+          message: 'Could not calculate date from filter',
+          received: daysFilter
+        });
+      }
+      query.date = filterDate;
+    }
+
+    if (modeFilter && modeFilter !== 'BAU') {
+      query.campaign = { $regex: modeFilter === 're-engagement' ? /re-engagement/i : /re-activation/i };
+    } else if (modeFilter === 'BAU') {
+      query.$and = [
+        { campaign: { $not: { $regex: /re-engagement/i } } },
+        { campaign: { $not: { $regex: /re-activation/i } } }
+      ];
+    }
+
+    const listConfigs = await Segmentation.find(query).sort({ order: 1 }).lean();
+    if (!listConfigs.length) {
+      return res.status(404).json({ 
+        error: 'No campaigns match the selected filters',
+        filters: { daysFilter, modeFilter }
+      });
+    }
+
+    res.json({
+      message: `🚀 Background processing started with ${INTER_LIST_DELAY_MS / 60000}-minute delay`,
+      count: listConfigs.length,
+      firstCampaign: listConfigs[0]?.campaign || 'None',
+      totalContactsRequested: listConfigs.reduce((sum, c) => sum + c.count, 0),
+      estimatedCompletionTime: `${Math.ceil(listConfigs.length * INTER_LIST_DELAY_MS / 3600000)} hrs ${Math.ceil((listConfigs.length * INTER_LIST_DELAY_MS % 3600000) / 60000)} mins`
+    });
+
+    setImmediate(async () => {
+      try {
+        await processCampaignsWithDelay(listConfigs, daysFilter, modeFilter);
+      } catch (error) {
+        console.error('❌ Overall process failed:', error.message);
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in /create-lists:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
+// Rest of the routes remain unchanged
 router.get('/created-lists', async (req, res) => {
   try {
     const now = new Date();
